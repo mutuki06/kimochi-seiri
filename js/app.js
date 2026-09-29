@@ -1,6 +1,6 @@
 import * as db from './db.js';
 import {
-  MOODS, SCENARIOS, EMOTIONS, EVENTS, THOUGHTS, CONCERNS, PERSPECTIVE_RESPONSES, ACTIONS, OUTCOMES, SUPPORT_LINES,
+  MOODS, SCENARIOS, EMOTIONS, EVENTS, THOUGHTS, CONCERNS, PERSPECTIVE_RESPONSES, ACTIONS, OUTCOMES, SUPPORT_PLACES,
   byId, labelOf, current,
 } from './data.js';
 import * as L from './logic.js';
@@ -134,12 +134,9 @@ function safetyCard() {
     h('h2', { id: 'safety-title' }, '今ひとりで抱えるには、重すぎる状態かもしれません'),
     h('p', {}, '身近な人や専門機関など、現実の支援につながることも考えてください。このアプリは診断や治療を行うものではありません。'),
     h('p', {}, h('strong', {}, '命の危険を感じるときは、すぐに 119（救急）や 110（警察）に連絡してください。')),
-    h('ul', { class: 'support-list' }, SUPPORT_LINES.map((s) => h('li', {},
-      h('a', { href: `tel:${s.tel.replace(/-/g, '')}`, class: 'support-link' },
-        h('span', { class: 'support-name' }, s.name),
-        h('span', { class: 'support-tel' }, s.tel)),
-      h('span', { class: 'muted small' }, s.note)))),
-    h('p', { class: 'muted small' }, '番号や受付時間は変わることがあります。日本国外にいる場合は、その地域の緊急番号や相談窓口に連絡してください。'),
+    h('p', {}, '話せる相手・相談できる場所の例：'),
+    h('ul', { class: 'plain dots' }, SUPPORT_PLACES.map((p) => h('li', {}, p))),
+    h('p', { class: 'muted small' }, '日本国外にいる場合は、その地域の緊急番号や相談窓口に連絡してください。'),
   );
 }
 
@@ -936,7 +933,7 @@ async function screenSettings() {
 
     h('section', { class: 'card' },
       h('h2', {}, 'つらさが強いとき'),
-      h('p', {}, h('a', { href: '#/support', class: 'text-link' }, '相談先・緊急時の連絡先を見る'))),
+      h('p', {}, h('a', { href: '#/support', class: 'text-link' }, '相談先・緊急時の案内を見る'))),
 
     h('section', { class: 'card' },
       h('h2', {}, 'このアプリについて'),
@@ -961,7 +958,7 @@ async function screenSettings() {
 function screenSupport() {
   return h('div', { class: 'screen support' },
     backLink('#/', 'ホーム'),
-    h('h1', {}, '相談先・緊急時の連絡先'),
+    h('h1', {}, '相談先・緊急時の案内'),
     h('p', {}, 'ひとりで抱えるには重いと感じたら、身近な人や専門の窓口を頼ってください。'),
     safetyCard());
 }

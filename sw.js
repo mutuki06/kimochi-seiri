@@ -1,6 +1,6 @@
 // オフライン用のキャッシュ。アプリ本体のファイルだけを扱い、記録データには触れない。
 // ファイルを更新したら CACHE の番号を上げること。
-const CACHE = 'kimochi-v4';
+const CACHE = 'kimochi-v5';
 const ASSETS = [
   './',
   './index.html',
