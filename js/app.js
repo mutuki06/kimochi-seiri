@@ -5,6 +5,7 @@ import {
 } from './data.js';
 import * as L from './logic.js';
 import { BIRDS } from './birds.js';
+import * as T from './today.js';
 
 const main = document.getElementById('main');
 const SAVE_ERROR = '記録を保存できませんでした。入力内容を確認して、もう一度試してください。';
@@ -173,6 +174,9 @@ function say(bird, text, { live = false, cont = false } = {}) {
 
 const routes = [
   [/^\/?$/, screenHome],
+  [/^\/moyamoya$/, screenMoyamoya],
+  [/^\/today(?:\/([\d-]+))?$/, (m) => screenToday(m[1])],
+  [/^\/history\/days$/, screenHistoryDays],
   [/^\/consult\/new\/(\w+)(?:\/(\w+))?$/, (m) => startConsult(m[1], m[2])],
   [/^\/consult\/([\w-]+)$/, (m) => screenConsult(m[1])],
   [/^\/reflect\/([\w-]+)$/, (m) => screenReflect(m[1])],
@@ -216,20 +220,28 @@ function mount(view) {
 
 async function screenHome() {
   let draft = null;
+  let today = null;
   try {
-    draft = (await db.getAllRecords()).find((r) => r.status === 'draft');
+    [draft, today] = await Promise.all([
+      db.getAllRecords().then((list) => list.find((r) => r.status === 'draft')),
+      db.getDay(T.dateKey()),
+    ]);
   } catch (e) { console.error(e); }
 
   return h('div', { class: 'screen home' },
-    say('enaga', 'うまく説明できなくても大丈夫。選ぶだけでもいいよ。'),
-    h('h1', { class: 'hero' }, '今日は、どんな感じ？'),
-    h('div', { class: 'mood-grid' }, current(MOODS).map((m) => h('a', {
-      href: `#/consult/new/${m.id}`, class: 'mood-btn',
-    }, m.label))),
-    h('section', { class: 'scenario-start', 'aria-labelledby': 'sc-title' },
-      h('h2', { id: 'sc-title', class: 'h3 muted' }, 'こんな気持ちから始めてもいいよ'),
-      // 気分の選択肢と同じもの（嫌われた気がする）は重ねて出さない
-      h('div', { class: 'stack' }, SCENARIOS.filter((s) => !current(MOODS).some((m) => m.label === s.label)).map((s) => h('a', { href: `#/consult/new/none/${s.id}`, class: 'scenario-btn' }, s.label)))),
+    say('enaga', T.greeting(T.dateKey(), { hasRecord: !!today })),
+    h('h1', { class: 'hero' }, '今日は、どうする？'),
+    h('div', { class: 'entry-list' },
+      h('a', { href: '#/moyamoya', class: 'entry' },
+        h('span', { class: 'entry-icon', 'aria-hidden': 'true' }, '🐦'),
+        h('span', { class: 'entry-body' },
+          h('span', { class: 'entry-title' }, 'モヤモヤしたとき'),
+          h('span', { class: 'entry-sub' }, 'ちょっと聞いてほしい'))),
+      h('a', { href: '#/today', class: 'entry' },
+        h('span', { class: 'entry-icon', 'aria-hidden': 'true' }, '🌱'),
+        h('span', { class: 'entry-body' },
+          h('span', { class: 'entry-title' }, '今日の自分'),
+          h('span', { class: 'entry-sub' }, today ? '今日の続きを見る' : '今日ここまでやってきたことを見てみよう')))),
     draft ? h('section', { class: 'card quiet' },
       h('h2', { class: 'h3' }, '途中の整理があります'),
       h('p', { class: 'muted small' }, `${fmtDateTime(draft.createdAt)}　${draft.eventText ? clip(draft.eventText, 30) : ''}`),
@@ -239,6 +251,251 @@ async function screenHome() {
       h('a', { href: '#/memo', class: 'nav-item' }, '自分へのメモ'),
       h('a', { href: '#/settings', class: 'nav-item' }, '設定')),
     h('p', { class: 'center small' }, h('a', { href: '#/support', class: 'text-link' }, 'つらさがとても強いとき・今すぐ助けが必要なとき')),
+  );
+}
+
+// モヤモヤしたとき：気分の選択（以前のホーム画面）
+function screenMoyamoya() {
+  return h('div', { class: 'screen moyamoya' },
+    backLink('#/', 'ホーム'),
+    say('enaga', 'うまく説明できなくても大丈夫。選ぶだけでもいいよ。'),
+    h('h1', { class: 'hero' }, '今日は、どんな感じ？'),
+    h('div', { class: 'mood-grid' }, current(MOODS).map((m) => h('a', {
+      href: `#/consult/new/${m.id}`, class: 'mood-btn',
+    }, m.label))),
+    h('section', { class: 'scenario-start', 'aria-labelledby': 'sc-title' },
+      h('h2', { id: 'sc-title', class: 'h3 muted' }, 'こんな気持ちから始めてもいいよ'),
+      // 気分の選択肢と同じもの（嫌われた気がする）は重ねて出さない
+      h('div', { class: 'stack' }, SCENARIOS.filter((s) => !current(MOODS).some((m) => m.label === s.label)).map((s) => h('a', { href: `#/consult/new/none/${s.id}`, class: 'scenario-btn' }, s.label)))),
+  );
+}
+
+// ---------------------------------------------------------------- 今日の自分
+
+async function screenToday(dateParam) {
+  const date = dateParam && T.isDateKey(dateParam) ? dateParam : T.dateKey();
+  const isToday = date === T.dateKey();
+  const [existing, allDays] = await Promise.all([db.getDay(date), db.getAllDays()]);
+  const day = existing || db.normalizeDay({ date });
+  let saved = !!existing;
+
+  // 前の日に「明日の自分に渡した」こと（今日の画面のときだけ）
+  const prev = isToday ? allDays.find((d) => d.date < date && d.carried.length) : null;
+
+  const status = h('p', { class: 'save-status muted small', 'aria-live': 'polite' });
+  const safetySlot = h('div', { 'aria-live': 'polite' });
+  const save = debounce(async () => {
+    try {
+      const res = await db.saveDay(day);
+      day.createdAt = res.createdAt;
+      day.updatedAt = res.updatedAt;
+      saved = true;
+      status.textContent = '保存しました';
+    } catch (e) {
+      console.error(e);
+      toast(SAVE_ERROR, { error: true });
+    }
+  }, 500);
+  const changed = () => {
+    const texts = [day.memo, ...day.doneOther, ...day.notDoneOther];
+    if (texts.some((t) => L.textHasCrisis(t)) && !safetySlot.firstChild) safetySlot.append(safetyCard());
+    status.textContent = '';
+    save();
+    drawClosing();
+  };
+
+  let seq = 0; // 声かけが毎回同じにならないように
+  const line = (list) => T.pick(list, `${date}-${seq++}`);
+
+  // ---- 気分 ----
+  const condReply = say('enaga', '', { live: true });
+  const restSlot = h('div', { 'aria-live': 'polite' });
+  const drawRest = () => {
+    const c = byId(T.CONDITIONS, day.condition);
+    restSlot.replaceChildren(c?.rest ? h('section', { class: 'card rest', 'aria-labelledby': 'rest-title' },
+      h('h2', { id: 'rest-title', class: 'h3' }, '今日は、休むことを優先してもいいよ'),
+      h('p', { class: 'muted small' }, 'できそうなものがあれば。どれもできなくてもいい。'),
+      h('ul', { class: 'plain dots' }, T.REST_IDEAS.map((r) => h('li', {}, r))),
+      h('p', { class: 'muted small' }, 'つらい状態が続く場合は、必要に応じて医療機関などに相談してね。',
+        day.condition === 'veryheavy' ? [' ', h('a', { href: '#/support', class: 'text-link' }, '相談先の案内')] : null)) : '');
+  };
+  const condSel = day.condition ? [day.condition] : [];
+  const condChips = chips({
+    items: T.CONDITIONS.map((c) => ({ value: c.id, label: c.label, emoji: c.emoji })), selected: condSel, multiple: false, label: '今日の自分の調子',
+    onChange: () => {
+      day.condition = condSel[0] || '';
+      const c = byId(T.CONDITIONS, day.condition);
+      condReply.setText(c ? line(c.lines) : '');
+      drawRest();
+      changed();
+    },
+  });
+  drawRest();
+
+  // ---- できたこと ----
+  const doneReply = say('enaga', '', { live: true });
+  const doneChips = chips({
+    items: T.DONE_ITEMS.map((d) => ({ value: d.id, label: d.label })), selected: day.done, label: '今日できたこと',
+    onChange: (id, on) => {
+      const item = byId(T.DONE_ITEMS, id);
+      doneReply.setText(on && item ? line(item.lines) : '');
+      changed();
+    },
+  });
+  let doneOtherLen = day.doneOther.length;
+  const doneOther = listEditor({
+    items: day.doneOther, label: 'その他にできたこと', placeholder: '例：ゴミを出した',
+    onChange: () => {
+      const added = day.doneOther.length > doneOtherLen;
+      doneOtherLen = day.doneOther.length;
+      doneReply.setText(added ? T.otherDoneLine(day.doneOther[day.doneOther.length - 1]) : '');
+      changed();
+    },
+  });
+
+  // ---- できなかったこと → 明日の自分に渡す ----
+  const notDoneReply = say('enaga', '', { live: true });
+  const carryList = h('div', { 'aria-live': 'polite' });
+  const taskOf = (id) => byId(T.NOT_DONE_ITEMS, id)?.task ?? id;
+  const allNotDone = () => [...day.notDone.map(taskOf), ...day.notDoneOther];
+  // できなかったことは、基本的に「明日の自分に渡す」。やらなくていいことにした分だけ外す。
+  const syncCarry = (added) => {
+    const tasks = allNotDone();
+    day.carried = day.carried.filter((t) => tasks.includes(t));
+    if (added && !day.carried.includes(added)) day.carried.push(added);
+  };
+  const drawCarry = () => {
+    const tasks = allNotDone();
+    carryList.replaceChildren(tasks.length ? h('div', { class: 'card quiet carry' },
+      h('h3', {}, '明日の自分に渡しておくもの'),
+      h('ul', { class: 'carry-list' }, tasks.map((t) => {
+        const kept = day.carried.includes(t);
+        return h('li', { class: kept ? '' : 'released' },
+          h('span', {}, t, kept ? null : h('span', { class: 'tag' }, 'やらなくていい')),
+          h('button', {
+            type: 'button', class: 'btn small', 'aria-pressed': String(!kept),
+            'aria-label': kept ? `「${t}」をやらなくていいことにする` : `「${t}」を明日の自分に渡す`,
+            onclick: () => {
+              if (kept) day.carried = day.carried.filter((x) => x !== t);
+              else day.carried.push(t);
+              notDoneReply.setText(kept ? 'うん、それはやらなくていいことにしよう。' : '明日の自分に渡しておくね。急がなくていいよ。');
+              drawCarry();
+              changed();
+            },
+          }, kept ? 'やらなくていいことにする' : '明日に渡す'));
+      })),
+      h('p', { class: 'muted small' }, '明日やらなくても大丈夫。渡しておくだけ。')) : '');
+  };
+  const notDoneChips = chips({
+    items: T.NOT_DONE_ITEMS.map((d) => ({ value: d.id, label: d.label })), selected: day.notDone, label: '今日はできなかったこと',
+    onChange: (id, on) => {
+      syncCarry(on ? taskOf(id) : null);
+      notDoneReply.setText(on ? line(T.NOT_DONE_LINES) : '');
+      drawCarry();
+      changed();
+    },
+  });
+  let notDoneOtherLen = day.notDoneOther.length;
+  const notDoneOther = listEditor({
+    items: day.notDoneOther, label: 'その他にできなかったこと', placeholder: '例：メールの返信',
+    onChange: () => {
+      const added = day.notDoneOther.length > notDoneOtherLen;
+      notDoneOtherLen = day.notDoneOther.length;
+      const last = added ? day.notDoneOther[day.notDoneOther.length - 1] : '';
+      syncCarry(last || null);
+      notDoneReply.setText(last ? line(T.NOT_DONE_LINES) : '');
+      drawCarry();
+      changed();
+    },
+  });
+  drawCarry();
+
+  // ---- 前の日から預かっていること ----
+  let prevSection = null;
+  if (prev) {
+    const handled = new Set();
+    const prevList = h('ul', { class: 'carry-list' });
+    const drawPrev = () => prevList.replaceChildren(...prev.carried.map((t) => {
+      const doneToday = day.doneOther.includes(t);
+      const passed = day.carried.includes(t);
+      return h('li', {},
+        h('span', {}, t, doneToday ? h('span', { class: 'tag' }, '今日できた') : passed ? h('span', { class: 'tag' }, 'また明日に') : null),
+        handled.has(t) || doneToday || passed ? null : h('span', { class: 'row tight' },
+          h('button', { type: 'button', class: 'btn small', onclick: () => {
+            day.doneOther.push(t); doneOtherLen++; handled.add(t); doneOther.redraw(); doneReply.setText(T.otherDoneLine(t)); drawPrev(); changed();
+          } }, '今日できた'),
+          h('button', { type: 'button', class: 'btn small', onclick: () => {
+            day.notDoneOther.push(t); notDoneOtherLen++; if (!day.carried.includes(t)) day.carried.push(t); handled.add(t); notDoneOther.redraw(); drawCarry(); drawPrev(); changed();
+          } }, 'また明日に渡す')));
+    }));
+    drawPrev();
+    prevSection = h('section', { class: 'card quiet', 'aria-labelledby': 'prev-title' },
+      h('h2', { id: 'prev-title', class: 'h3' }, `${fmtDate(T.parseDateKey(prev.date).toISOString())}の自分から、預かってるよ`),
+      h('p', { class: 'muted small' }, '今日じゃなくてもいいからね。'),
+      prevList);
+  }
+
+  // ---- メモ ----
+  const memo = h('textarea', { rows: 3, placeholder: '今日のこと、なんでも', value: day.memo });
+  memo.addEventListener('input', () => { day.memo = memo.value; changed(); });
+
+  // ---- 今日の自分へ（夜の振り返り） ----
+  const closingSlot = h('div');
+  let showClosing = !isToday || T.timeOfDay() === 'night';
+  function drawClosing() {
+    if (!showClosing) {
+      closingSlot.replaceChildren(h('button', { type: 'button', class: 'btn wide', onclick: () => { showClosing = true; drawClosing(); closingSlot.querySelector('h2')?.focus(); } }, '今日の振り返りを見る'));
+      return;
+    }
+    const doneLabels = [...day.done.map((id) => labelOf(T.DONE_ITEMS, id)), ...day.doneOther];
+    const bird = h('div', { class: 'bird today-bird', 'aria-hidden': 'true' });
+    bird.innerHTML = BIRDS.enaga.svg;
+    closingSlot.replaceChildren(h('section', { class: 'today day-closing', 'aria-labelledby': 'closing-title' },
+      bird,
+      h('h2', { id: 'closing-title', tabindex: '-1' }, isToday ? '今日の自分へ' : 'この日の自分へ'),
+      doneLabels.length ? h('div', { class: 'closing-block' },
+        h('p', { class: 'muted small' }, isToday ? '今日できたこと' : 'この日できたこと'),
+        h('ul', { class: 'plain closing-list' }, doneLabels.map((l) => h('li', {}, l)))) : null,
+      day.carried.length ? h('div', { class: 'closing-block' },
+        h('p', { class: 'muted small' }, '明日の自分に渡したこと'),
+        h('ul', { class: 'plain closing-list' }, day.carried.map((l) => h('li', {}, l)))) : null,
+      h('p', { class: 'today-message' }, T.closing(day))));
+  }
+  drawClosing();
+
+  const del = async () => {
+    const ok = await confirmDialog({ title: 'この日の記録を削除しますか？', body: '削除した記録は元に戻せません。', ok: '削除する', danger: true });
+    if (!ok) return;
+    try { await db.deleteDay(date); toast('削除しました。'); location.hash = '#/history/days'; } catch (e) { console.error(e); toast('削除できませんでした。もう一度試してください。', { error: true }); }
+  };
+
+  const dateLabel = fmtDate(T.parseDateKey(date).toISOString());
+  return h('div', { class: 'screen today-screen' },
+    backLink(isToday ? '#/' : '#/history/days', isToday ? 'ホーム' : '過去の記録'),
+    say('enaga', T.greeting(date, { hasRecord: saved })),
+    h('h1', {}, isToday ? '今日の自分はどう？' : `${dateLabel}の自分`),
+    h('p', { class: 'muted small' }, isToday ? `${dateLabel}　全部書かなくていいよ。` : '書き足したり、直したりできるよ。'),
+    safetySlot,
+    condChips, condReply, restSlot,
+    prevSection,
+    h('section', { class: 'day-sec', 'aria-labelledby': 'done-title' },
+      h('h2', { id: 'done-title' }, isToday ? '今日できたこと' : 'この日できたこと'),
+      h('p', { class: 'muted small' }, '「こんなの当たり前」と思うことも、入れていいよ。'),
+      doneChips,
+      h('div', { class: 'field' }, h('p', { class: 'label' }, 'その他'), doneOther),
+      doneReply),
+    h('section', { class: 'day-sec', 'aria-labelledby': 'notdone-title' },
+      h('h2', { id: 'notdone-title' }, 'やろうと思ってたけど、できなかったこと'),
+      h('p', { class: 'muted small' }, 'あれば。できなかったことは、明日の自分に渡しておけるよ。'),
+      notDoneChips,
+      h('div', { class: 'field' }, h('p', { class: 'label' }, 'その他'), notDoneOther),
+      notDoneReply,
+      carryList),
+    h('section', { class: 'day-sec' }, field('自由メモ', memo)),
+    status,
+    closingSlot,
+    !isToday && existing ? h('div', { class: 'danger-zone' },
+      h('button', { type: 'button', class: 'btn danger-outline', onclick: del }, 'この日の記録を削除')) : null,
   );
 }
 
@@ -686,12 +943,38 @@ async function screenHistory() {
   return h('div', { class: 'screen history' },
     backLink('#/', 'ホーム'),
     h('h1', {}, '過去の記録'),
+    historyTabs('records'),
     field('キーワードで探す', search),
     h('div', { class: 'field' },
       h('p', { class: 'label' }, '気持ちで絞り込む'),
       chips({ items: EMOTIONS.map((e) => ({ value: e.id, label: e.label })), selected: state.emotion, multiple: false, label: '気持ちで絞り込む', onChange: draw })),
     h('div', { class: 'check-row' }, pending, h('label', { for: 'pending' }, '「その後」をまだ書いていないものだけ')),
     list);
+}
+
+function historyTabs(active) {
+  const tab = (href, label, key) => h('a', { href, class: `tab${active === key ? ' on' : ''}`, 'aria-current': active === key ? 'page' : null }, label);
+  return h('nav', { class: 'tabs', 'aria-label': '記録の種類' },
+    tab('#/history', 'モヤモヤの記録', 'records'),
+    tab('#/history/days', '今日の自分', 'days'));
+}
+
+async function screenHistoryDays() {
+  const days = await db.getAllDays();
+  return h('div', { class: 'screen history' },
+    backLink('#/', 'ホーム'),
+    h('h1', {}, '過去の記録'),
+    historyTabs('days'),
+    days.length ? h('ul', { class: 'record-list' }, days.map((d) => {
+      const cond = byId(T.CONDITIONS, d.condition);
+      const done = [...d.done.map((id) => labelOf(T.DONE_ITEMS, id)), ...d.doneOther];
+      return h('li', {},
+        h('a', { href: `#/today/${d.date}`, class: 'record-item' },
+          h('span', { class: 'record-date' }, fmtDate(T.parseDateKey(d.date).toISOString()),
+            cond ? h('span', { class: 'muted' }, `　${cond.emoji} ${cond.label}`) : null),
+          done.length ? h('span', { class: 'record-text' }, clip(done.join('、'), 60)) : h('span', { class: 'record-text muted' }, '（ここに来た日）'),
+          d.carried.length ? h('span', { class: 'record-outcome' }, `明日に渡したこと：${clip(d.carried.join('、'), 40)}`) : null));
+    })) : h('p', { class: 'muted' }, 'まだ記録はありません。書かない日があっても、大丈夫。'));
 }
 
 // ---------------------------------------------------------------- Record detail
@@ -868,7 +1151,7 @@ async function screenSettings() {
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-      toast(`バックアップを作りました（記録${data.records.length}件・メモ${data.memos.length}件）。`);
+      toast(`バックアップを作りました（相談${data.records.length}件・今日の自分${data.days.length}日分・メモ${data.memos.length}件）。`);
     } catch (e) { console.error(e); toast('バックアップを作れませんでした。もう一度試してください。', { error: true }); }
   };
 
@@ -902,7 +1185,7 @@ async function screenSettings() {
   const clear = async () => {
     const ok1 = await confirmDialog({
       title: 'すべての記録とメモを削除しますか？',
-      body: 'この端末に保存されている記録とメモがすべて消え、元に戻せません。必要ならさきにバックアップを作ってください。',
+      body: 'この端末に保存されている相談の記録・今日の自分・メモがすべて消え、元に戻せません。必要ならさきにバックアップを作ってください。',
       ok: '次へ', danger: true,
     });
     if (!ok1) return;

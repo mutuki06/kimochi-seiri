@@ -10,6 +10,13 @@
 - タカ：少し離れて見る（出来事と考えを分ける、別の可能性、別の見方）
 - よくある自己否定のパターン（シナリオ）：甘えている気がする／嫌われた気がする／自分だけうまくできない気がする
 
+ホームの入口は2つ。
+
+- 🐦 **モヤモヤしたとき**：悩み・感情・考えを整理する場所（上の流れ）
+- 🌱 **今日の自分**：今日できたこと・休むこと・できなかったことをやさしく確認する場所。
+  「起きた」「帰ってきた」のような当たり前に見える行動も拾い、できなかったことは「明日の自分に渡す」。
+  しんどい日は休むことを優先する提案を出し、夜は「今日の自分へ」で静かに締める。数・達成率・連続記録は出さない。
+
 ## 起動
 
 ビルド不要。任意の静的サーバーで配信する（Service Worker のため `file://` では PWA 機能が動かない）。
@@ -25,10 +32,11 @@ http://localhost:8765 を開く。
 | ファイル | 役割 |
 |---|---|
 | `index.html` / `style.css` | 画面の土台・デザイン（ライト/ダーク、文字サイズ2段階） |
-| `js/app.js` | ハッシュルーティングと各画面（Home / Consultation / Reflection / History / Record / Memo / Settings / Support） |
+| `js/app.js` | ハッシュルーティングと各画面（Home / Moyamoya / Consultation / Reflection / Today / History / Record / Memo / Settings / Support / Welcome） |
 | `js/data.js` | 選択肢・シナリオ別の出来事/考え/つらさ・相談先。**id は保存データに使うので変更しない**（旧版の選択肢は `legacy: true` で表示用に残す） |
 | `js/birds.js` | マスコットの SVG |
-| `js/db.js` | IndexedDB（`records` / `memos`）、正規化、JSON エクスポート/インポート |
+| `js/today.js` | 「今日の自分」の選択肢・声かけ・日付ユーティリティ。文言ルールは冒頭コメント参照 |
+| `js/db.js` | IndexedDB（`records` / `memos` / `days`）、正規化、JSON エクスポート/インポート |
 | `js/logic.js` | ルールベースの整理ロジック（考えのタグ付け、シナリオ推定、鳥のひとこと、別の見方、「こんな人もいる」、今日の言葉、類似記録、安全確認）。文言ルール（診断しない・一般化しない等）は冒頭コメント参照 |
 | `sw.js` | オフライン用キャッシュ。ファイル更新時は `CACHE` の番号を上げる |
 
@@ -44,5 +52,9 @@ http://localhost:8765 を開く。
 
 相談記録（`records`）の主なフィールド：
 `id, createdAt, updatedAt, status(draft|saved), initialMood, eventText, emotions[], facts[], interpretations[], unknowns[], coreConcern, scenario, perspectiveResponse, todayMessage, chosenAction, adviceViewed, outcome, outcomeNote, outcomeDate, personalMemo, replyDraft, reflectionNote, safetyFlag, schemaVersion`
+
+「今日の自分」（`days`、キーは `date` = YYYY-MM-DD）：
+`date, createdAt, updatedAt, condition, done[], doneOther[], notDone[], notDoneOther[], carried[], memo, schemaVersion`
+（`carried` は明日の自分に渡したこと。次の日の画面に「預かってるよ」として出る）
 
 構造を変えるときは `db.js` の `DB_VERSION` / `SCHEMA_VERSION` を上げ、`normalizeRecord` と `onupgradeneeded` に移行処理を足す。インポートは既存データを消さず、同じ id は `updatedAt` が新しい方を残す。

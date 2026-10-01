@@ -1,8 +1,9 @@
-// IndexedDB による端末内保存。相談記録・自分へのメモはすべてここに置く。
+// IndexedDB による端末内保存。相談記録・今日の自分・自分へのメモはすべてここに置く。
 // 外部への送信は一切行わない。
 
 const DB_NAME = 'kimochi-seiri';
-const DB_VERSION = 1;
+// v2: 「今日の自分」用の days ストアを追加（既存ストアには触れない）
+const DB_VERSION = 2;
 // 2: scenario / perspectiveResponse / todayMessage を追加（既存記録は空文字で補う）
 export const SCHEMA_VERSION = 2;
 
@@ -26,10 +27,19 @@ function open() {
         const memos = db.createObjectStore('memos', { keyPath: 'id' });
         memos.createIndex('createdAt', 'createdAt');
       }
+      if (e.oldVersion < 2) {
+        db.createObjectStore('days', { keyPath: 'date' });
+      }
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      // 別のタブで新しい版が開かれたら、更新を妨げないよう接続を閉じる
+      db.onversionchange = () => { db.close(); dbPromise = null; };
+      resolve(db);
+    };
     req.onerror = () => reject(req.error);
-    req.onblocked = () => reject(new Error('IndexedDB open blocked'));
+    // 古い版のタブが開いたままのときは、閉じられるまで待つ（onsuccess が後から呼ばれる）
+    req.onblocked = () => console.warn('IndexedDB upgrade is waiting for other tabs to close');
   });
   dbPromise.catch(() => { dbPromise = null; });
   return dbPromise;
@@ -102,6 +112,28 @@ export function normalizeMemo(m = {}) {
   };
 }
 
+// 「今日の自分」1日分。date（YYYY-MM-DD）がキー。
+export const DAY_SCHEMA_VERSION = 1;
+export function normalizeDay(d = {}) {
+  const now = new Date().toISOString();
+  const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+  const str = (v) => (typeof v === 'string' ? v : '');
+  return {
+    ...d,
+    date: str(d.date),
+    schemaVersion: DAY_SCHEMA_VERSION,
+    createdAt: str(d.createdAt) || now,
+    updatedAt: str(d.updatedAt) || now,
+    condition: str(d.condition), // その日の気分
+    done: arr(d.done), // できたこと（id）
+    doneOther: arr(d.doneOther), // できたこと（自由入力）
+    notDone: arr(d.notDone), // できなかったこと（id）
+    notDoneOther: arr(d.notDoneOther), // できなかったこと（自由入力）
+    carried: arr(d.carried), // 明日の自分に渡したこと（表示用の文）
+    memo: str(d.memo),
+  };
+}
+
 // ---- records ----
 export function saveRecord(record, { touch = true } = {}) {
   const r = normalizeRecord(record);
@@ -139,15 +171,38 @@ export function deleteMemo(id) {
   return tx('memos', 'readwrite', (s) => wrap(s.delete(id)));
 }
 
+// ---- days ----
+export function saveDay(day) {
+  const d = normalizeDay(day);
+  if (!d.date) return Promise.reject(new Error('day without date'));
+  d.updatedAt = new Date().toISOString();
+  return tx('days', 'readwrite', (s) => wrap(s.put(d))).then(() => d);
+}
+
+export function getDay(date) {
+  return tx('days', 'readonly', (s) => wrap(s.get(date)))
+    .then((d) => (d ? normalizeDay(d) : null));
+}
+
+export function getAllDays() {
+  return tx('days', 'readonly', (s) => wrap(s.getAll()))
+    .then((list) => list.map(normalizeDay).sort((a, b) => b.date.localeCompare(a.date)));
+}
+
+export function deleteDay(date) {
+  return tx('days', 'readwrite', (s) => wrap(s.delete(date)));
+}
+
 // ---- backup ----
 export async function exportAll() {
-  const [records, memos] = await Promise.all([getAllRecords(), getAllMemos()]);
+  const [records, memos, days] = await Promise.all([getAllRecords(), getAllMemos(), getAllDays()]);
   return {
     app: 'kimochi-seiri',
     schemaVersion: SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
     records,
     memos,
+    days,
   };
 }
 
@@ -158,13 +213,14 @@ export async function importAll(data) {
   }
   const records = Array.isArray(data.records) ? data.records : [];
   const memos = Array.isArray(data.memos) ? data.memos : [];
+  const days = Array.isArray(data.days) ? data.days : []; // 古いバックアップには無い
   const count = { added: 0, updated: 0, skipped: 0 };
 
-  const merge = (storeName, items, normalize) => tx(storeName, 'readwrite', async (s) => {
+  const merge = (storeName, items, normalize, key = 'id') => tx(storeName, 'readwrite', async (s) => {
     for (const raw of items) {
-      if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string') { count.skipped++; continue; }
+      if (!raw || typeof raw !== 'object' || typeof raw[key] !== 'string' || !raw[key]) { count.skipped++; continue; }
       const item = normalize(raw);
-      const existing = await wrap(s.get(item.id));
+      const existing = await wrap(s.get(item[key]));
       if (!existing) { await wrap(s.put(item)); count.added++; }
       else if ((item.updatedAt || '') > (existing.updatedAt || '')) { await wrap(s.put(item)); count.updated++; }
       else count.skipped++;
@@ -173,14 +229,16 @@ export async function importAll(data) {
 
   await merge('records', records, normalizeRecord);
   await merge('memos', memos, normalizeMemo);
+  await merge('days', days, normalizeDay, 'date');
   return count;
 }
 
 export function clearAll() {
   return open().then((db) => new Promise((resolve, reject) => {
-    const t = db.transaction(['records', 'memos'], 'readwrite');
+    const t = db.transaction(['records', 'memos', 'days'], 'readwrite');
     t.objectStore('records').clear();
     t.objectStore('memos').clear();
+    t.objectStore('days').clear();
     t.oncomplete = () => resolve();
     t.onerror = () => reject(t.error);
   }));

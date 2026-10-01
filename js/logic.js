@@ -277,3 +277,5 @@ export function detectCrisis(record) {
   ];
   return texts.some((t) => t && CRISIS_RE.test(t));
 }
+
+export const textHasCrisis = (t) => !!t && CRISIS_RE.test(t);
