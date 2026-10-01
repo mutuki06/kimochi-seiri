@@ -54,13 +54,33 @@ function confirmDialog({ title, body, ok = 'OK', cancel = 'キャンセル', dan
   });
 }
 
+// 複数の選択肢から選ぶダイアログ。キャンセル（Esc を含む）は null。
+function choiceDialog({ title, body, choices, cancel = 'キャンセル' }) {
+  const dlg = document.getElementById('dialog');
+  return new Promise((resolve) => {
+    const done = (v) => { dlg.close(); resolve(v); };
+    dlg.replaceChildren(
+      h('h2', { id: 'dlg-title' }, title),
+      body ? h('p', {}, body) : null,
+      h('div', { class: 'stack' },
+        choices.map((c) => h('button', { type: 'button', class: `btn ${c.kind || ''}`, onclick: () => done(c.value) }, c.label)),
+        h('button', { type: 'button', class: 'btn', onclick: () => done(null) }, cancel)),
+    );
+    dlg.setAttribute('aria-labelledby', 'dlg-title');
+    dlg.oncancel = (e) => { e.preventDefault(); done(null); };
+    dlg.showModal();
+  });
+}
+
 const fmtDate = (iso) => new Intl.DateTimeFormat('ja-JP', { month: 'numeric', day: 'numeric', weekday: 'short' }).format(new Date(iso));
 const fmtDateTime = (iso) => new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(iso));
 const clip = (s, n = 60) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
 function debounce(fn, ms = 500) {
   let t;
-  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  const run = (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  run.cancel = () => clearTimeout(t);
+  return run;
 }
 
 async function persist(record, opts) {
@@ -191,8 +211,57 @@ const routes = [
 // はじめての人には、使う前に保存のしくみを伝える（相談先だけは説明の前でも開ける）
 const WELCOME_FREE = ['/welcome', '/support'];
 
+// 入力中の画面は leaveGuard を置く。
+//   allow(path): 確認なしで移ってよい行き先か
+//   confirm():  離れてよければ true（保存・破棄はこの中で済ませる）
+//   dirty():    ページを閉じる前に警告するか
+let leaveGuard = null;
+let currentPath = null;
+let restoring = false;
+
+const pathOf = (href) => decodeURIComponent(href.replace(/^#/, '')) || '/';
+
+// 確認を済ませた（または確認不要の）移動
+function leave(href) {
+  leaveGuard = null;
+  location.hash = href;
+}
+
+async function guardedLeave(path) {
+  const guard = leaveGuard;
+  if (!guard || guard.allow?.(path)) return true;
+  const ok = await guard.confirm();
+  if (ok && leaveGuard === guard) leaveGuard = null;
+  return ok;
+}
+
+// アプリ内リンクは、移動する前に確認する
+document.addEventListener('click', async (e) => {
+  const a = e.target.closest?.('a[href^="#"]');
+  if (!a || !leaveGuard || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const href = a.getAttribute('href');
+  if (pathOf(href) === currentPath || leaveGuard.allow?.(pathOf(href))) return;
+  e.preventDefault();
+  if (await guardedLeave(pathOf(href))) location.hash = href;
+});
+
+window.addEventListener('beforeunload', (e) => {
+  if (leaveGuard?.dirty?.()) { e.preventDefault(); e.returnValue = ''; }
+});
+
 async function render() {
   const path = decodeURIComponent(location.hash.replace(/^#/, '')) || '/';
+  // ブラウザの「戻る」などで離れようとしたとき：いったん元の画面に戻してから確認する
+  if (restoring && path === currentPath) { restoring = false; return; }
+  if (leaveGuard && currentPath && path !== currentPath && !leaveGuard.allow?.(path)) {
+    const target = location.hash;
+    restoring = true;
+    location.replace(`#${currentPath}`);
+    if (await guardedLeave(path)) location.hash = target;
+    return;
+  }
+  leaveGuard = null;
+  currentPath = path;
   if (!loadPrefs().welcomed && !WELCOME_FREE.includes(path)) { location.replace('#/welcome'); return; }
   const hit = routes.find(([re]) => re.test(path));
   if (!hit) { location.replace('#/'); return; }
@@ -277,31 +346,70 @@ async function screenToday(dateParam) {
   const isToday = date === T.dateKey();
   const [existing, allDays] = await Promise.all([db.getDay(date), db.getAllDays()]);
   const day = existing || db.normalizeDay({ date });
-  let saved = !!existing;
+  const saved = !!existing;
 
   // 前の日に「明日の自分に渡した」こと（今日の画面のときだけ）
   const prev = isToday ? allDays.find((d) => d.date < date && d.carried.length) : null;
 
+  // 入力は「保存してホームへ」を押すまで端末に書き込まない（保存せずに終了したら何も残らない）
+  let dirty = false;
   const status = h('p', { class: 'save-status muted small', 'aria-live': 'polite' });
   const safetySlot = h('div', { 'aria-live': 'polite' });
-  const save = debounce(async () => {
+  const saveDay = async () => {
     try {
-      const res = await db.saveDay(day);
-      day.createdAt = res.createdAt;
-      day.updatedAt = res.updatedAt;
-      saved = true;
-      status.textContent = '保存しました';
+      await db.saveDay(day);
+      dirty = false;
+      return true;
     } catch (e) {
       console.error(e);
       toast(SAVE_ERROR, { error: true });
+      return false;
     }
-  }, 500);
+  };
   const changed = () => {
     const texts = [day.memo, ...day.doneOther, ...day.notDoneOther];
     if (texts.some((t) => L.textHasCrisis(t)) && !safetySlot.firstChild) safetySlot.append(safetyCard());
-    status.textContent = '';
-    save();
+    dirty = true;
+    status.textContent = 'まだ保存していません';
     drawClosing();
+  };
+
+  leaveGuard = {
+    dirty: () => dirty,
+    async confirm() {
+      if (!dirty) return true;
+      const choice = await choiceDialog({
+        title: 'まだ保存していない内容があります。終了しますか？',
+        body: existing ? '「保存せずに戻る」を選ぶと、前に保存した内容のまま残ります。' : '「保存せずに戻る」を選ぶと、今回入力した内容は残りません。',
+        choices: [
+          { value: 'save', label: '保存して戻る', kind: 'primary' },
+          { value: 'discard', label: '保存せずに戻る', kind: 'danger-outline' },
+        ],
+      });
+      if (choice === 'save') {
+        if (!(await saveDay())) return false;
+        toast('保存しました。');
+        return true;
+      }
+      return choice === 'discard';
+    },
+  };
+
+  const saveAndHome = async () => {
+    if (!(await saveDay())) return;
+    toast('保存しました。');
+    leave('#/');
+  };
+  const exitWithoutSaving = async () => {
+    if (dirty) {
+      const ok = await confirmDialog({
+        title: '今回の記録は保存せずに終了しますか？',
+        body: existing ? '前に保存した内容は、そのまま残ります。' : '今回入力した内容は残りません。',
+        ok: '保存せずに終了', cancel: 'キャンセル', danger: true,
+      });
+      if (!ok) return;
+    }
+    leave('#/');
   };
 
   let seq = 0; // 声かけが毎回同じにならないように
@@ -466,7 +574,7 @@ async function screenToday(dateParam) {
   const del = async () => {
     const ok = await confirmDialog({ title: 'この日の記録を削除しますか？', body: '削除した記録は元に戻せません。', ok: '削除する', danger: true });
     if (!ok) return;
-    try { await db.deleteDay(date); toast('削除しました。'); location.hash = '#/history/days'; } catch (e) { console.error(e); toast('削除できませんでした。もう一度試してください。', { error: true }); }
+    try { await db.deleteDay(date); toast('削除しました。'); leave('#/history/days'); } catch (e) { console.error(e); toast('削除できませんでした。もう一度試してください。', { error: true }); }
   };
 
   const dateLabel = fmtDate(T.parseDateKey(date).toISOString());
@@ -492,8 +600,11 @@ async function screenToday(dateParam) {
       notDoneReply,
       carryList),
     h('section', { class: 'day-sec' }, field('自由メモ', memo)),
-    status,
     closingSlot,
+    h('div', { class: 'finish' },
+      status,
+      h('button', { type: 'button', class: 'btn primary wide', onclick: saveAndHome }, '保存してホームへ'),
+      h('button', { type: 'button', class: 'text-link muted', onclick: exitWithoutSaving }, '保存せずに終了')),
     !isToday && existing ? h('div', { class: 'danger-zone' },
       h('button', { type: 'button', class: 'btn danger-outline', onclick: del }, 'この日の記録を削除')) : null,
   );
@@ -512,16 +623,59 @@ async function startConsult(mood, scenario) {
   return null;
 }
 
+const isBlankRecord = (r) => !r.eventText.trim() && !r.emotions.length && !r.facts.length && !r.interpretations.length
+  && !r.unknowns.length && !r.coreConcern.trim() && !r.chosenAction && !r.personalMemo.trim() && !r.replyDraft.trim();
+
+// 保存していない下書きのまま離れるとき。保存済みの記録は対象外（消さない）。
+function draftGuard(record, pendingSaves) {
+  const own = (p) => p === `/consult/${record.id}` || p === `/reflect/${record.id}`;
+  return {
+    allow: own,
+    dirty: () => false, // 下書きは自動で残っている
+    async confirm() {
+      if (record.status === 'saved') return true;
+      pendingSaves.forEach((f) => f.cancel());
+      if (isBlankRecord(record)) {
+        // 何も入力していない下書きは、黙って片付ける
+        await db.deleteRecord(record.id).catch((e) => console.error(e));
+        return true;
+      }
+      const choice = await choiceDialog({
+        title: 'まだ保存していない内容があります。終了しますか？',
+        body: '「保存せずに戻る」を選ぶと、今回入力した内容は残りません。',
+        choices: [
+          { value: 'save', label: '保存して戻る', kind: 'primary' },
+          { value: 'discard', label: '保存せずに戻る', kind: 'danger-outline' },
+        ],
+      });
+      if (choice === 'save') {
+        record.status = 'saved';
+        delete record.draftStep;
+        if (!(await persist(record))) return false;
+        toast('記録しました。');
+        return true;
+      }
+      if (choice === 'discard') {
+        try { await db.deleteRecord(record.id); return true; } catch (e) { console.error(e); toast(SAVE_ERROR, { error: true }); return false; }
+      }
+      return false;
+    },
+  };
+}
+
 // 気持ち → 出来事 → 頭に浮かんだこと → その奥の気持ち → 別の見方 →（結果画面で）今日の言葉
 const STEPS = ['emotions', 'event', 'thoughts', 'deeper', 'view'];
 
 async function screenConsult(id) {
   const record = await db.getRecord(id);
   if (!record) { toast('この整理は見つかりませんでした。'); location.replace('#/'); return null; }
+  // 保存済みの記録は、相談の流れでは開かない（書き換え・削除を防ぐ）
+  if (record.status === 'saved') { location.replace(`#/record/${record.id}`); return null; }
   let step = Math.min(Math.max(record.draftStep || 0, 0), STEPS.length - 1);
 
   const root = h('div', { class: 'screen consult' });
   const saveSoon = debounce(() => persist(record, { touch: true }), 600);
+  leaveGuard = draftGuard(record, [saveSoon]);
 
   const safetySlot = h('div', { 'aria-live': 'polite' });
   const checkSafety = () => {
@@ -540,8 +694,9 @@ async function screenConsult(id) {
   };
 
   const finishNow = async () => {
+    saveSoon.cancel();
     record.status = 'saved';
-    if (await persist(record)) { toast('ここまでを記録しました。'); location.hash = '#/'; }
+    if (await persist(record)) { toast('ここまでを記録しました。'); leave('#/'); }
   };
   const discard = async () => {
     const ok = await confirmDialog({
@@ -550,7 +705,8 @@ async function screenConsult(id) {
       ok: '記録せずにやめる', danger: true,
     });
     if (!ok) return;
-    try { await db.deleteRecord(record.id); location.hash = '#/'; } catch (e) { console.error(e); toast(SAVE_ERROR, { error: true }); }
+    saveSoon.cancel();
+    try { await db.deleteRecord(record.id); leave('#/'); } catch (e) { console.error(e); toast(SAVE_ERROR, { error: true }); }
   };
 
   const scenario = () => L.scenarioOf(record);
@@ -848,9 +1004,11 @@ function actionPanel(record, save) {
 async function screenReflect(id) {
   const [record, all] = await Promise.all([db.getRecord(id), db.getAllRecords()]);
   if (!record) { toast('この整理は見つかりませんでした。'); location.replace('#/'); return null; }
+  if (record.status === 'saved') { location.replace(`#/record/${record.id}`); return null; }
   if (L.detectCrisis(record)) record.safetyFlag = true;
   const message = L.todayMessage(record);
   const save = debounce(() => persist(record), 600);
+  leaveGuard = draftGuard(record, [save]);
 
   const panel = h('div', { 'aria-live': 'polite' });
   const drawPanel = () => panel.replaceChildren(actionPanel(record, save) || '');
@@ -861,15 +1019,17 @@ async function screenReflect(id) {
   const similarCount = L.findSimilar(record, all).length;
 
   const finish = async () => {
+    save.cancel();
     record.status = 'saved';
     record.todayMessage = message;
     delete record.draftStep;
-    if (await persist(record)) { toast('記録しました。'); location.hash = '#/'; }
+    if (await persist(record)) { toast('記録しました。'); leave('#/'); }
   };
   const discard = async () => {
     const ok = await confirmDialog({ title: '記録せずに終わりますか？', body: '今回の整理は残りません。', ok: '記録せずに終わる', danger: true });
     if (!ok) return;
-    try { await db.deleteRecord(record.id); location.hash = '#/'; } catch (e) { console.error(e); toast(SAVE_ERROR, { error: true }); }
+    save.cancel();
+    try { await db.deleteRecord(record.id); leave('#/'); } catch (e) { console.error(e); toast(SAVE_ERROR, { error: true }); }
   };
 
   const bird = h('div', { class: 'bird today-bird', 'aria-hidden': 'true' });

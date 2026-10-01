@@ -390,7 +390,7 @@ dialog h2 { margin-bottom: 0.5rem; }
 }
 .carry-list li.released > span:first-child { color: var(--muted); }
 .row.tight { margin-top: 0; gap: 6px; }
-.save-status { min-height: 1.5em; text-align: right; }
+.save-status { min-height: 1.5em; margin: 0; text-align: center; }
 .day-closing { margin-top: 2rem !important; }
 .day-closing h2 { margin: 0; }
 .day-closing h2:focus { outline: none; }
